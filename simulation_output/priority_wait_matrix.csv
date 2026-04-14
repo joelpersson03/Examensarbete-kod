@@ -1,15 +1,15 @@
-machine,forstabit,frekvensbit,normalbit,underhall
-Konturograf,0.0,0.0,0.0,0.0
-Konturograf 2,0.0,0.0,0.0,0.0
-P40 1,0.116,0.148,0.26,0.473
-P65,0.239,0.408,0.432,0.603
-Wenzel WGT350,0.161,0.191,0.383,0.893
-Wenzel WGT400,0.15,0.23,0.368,0.727
-Wenzel WGT500,0.124,0.173,0.288,0.525
-Wenzel WGT500 2,0.372,0.503,1.027,1.459
-Wenzel WGT600,0.15,0.216,0.376,0.872
-Ytmatare,0.0,0.0,0.007,0.0
-Zeiss 1,0.082,0.073,0.099,0.12
-Zeiss 12,0.0,0.0,0.0,0.0
-Zeiss 14,0.14,0.195,0.32,0.21
-Zeiss 15,0.052,0.069,0.072,0.2
+machine,forstabit,frekvensbit,normalbit
+Konturograf,0.0,0.0,0.0
+Konturograf 2,0.0,0.0,0.0
+P40 1,0.146,0.156,0.338
+P65,0.327,0.296,0.468
+Wenzel WGT350,0.188,0.223,0.538
+Wenzel WGT400,0.22,0.299,0.494
+Wenzel WGT500,0.177,0.239,0.307
+Wenzel WGT500 2,0.508,0.462,1.192
+Wenzel WGT600,0.201,0.295,0.445
+Ytmatare,0.012,0.0,0.006
+Zeiss 1,0.086,0.093,0.115
+Zeiss 12,0.0,0.0,0.0
+Zeiss 14,0.383,0.307,0.62
+Zeiss 15,0.058,0.031,0.09

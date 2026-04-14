@@ -16,18 +16,32 @@ PRIORITY_MAP = {
     "underhall": 4,
 }
 
-JOB_TYPE_SHARES = {
-    "forstabit": 0.10,
-    "frekvensbit": 0.20,
-    "normalbit": 0.60,
-    "underhall": 0.10,
-}
-
 JOB_TYPE_TIME_FACTORS = {
     "forstabit": 1.15,
     "frekvensbit": 1.00,
     "normalbit": 1.00,
     "underhall": 1.35,
+}
+
+# Timprofil per jobbtyp, baserad på genomsnittligt inflöde över dygnet.
+# Värdena är relativa vikter per timme och normaliseras automatiskt.
+HOURLY_PROFILE = {
+    "forstabit": [
+        78, 66, 77, 69, 95, 36, 70, 128, 77, 150, 159, 113,
+        97, 83, 102, 105, 114, 129, 83, 117, 118, 87, 57, 42,
+    ],
+    "underhall": [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    "normalbit": [
+        232, 260, 188, 167, 95, 16, 217, 206, 92, 270, 201, 195,
+        86, 35, 222, 229, 155, 163, 96, 166, 98, 48, 13, 139,
+    ],
+    "frekvensbit": [
+        30, 32, 31, 28, 15, 4, 20, 24, 12, 28, 26, 22,
+        14, 8, 18, 20, 16, 18, 14, 16, 12, 8, 4, 10,
+    ],
 }
 
 
@@ -58,6 +72,7 @@ class JobResult:
     job_type: str
     priority: int
     arrival_hour: float
+    arrival_hour_of_day: int
     service_start_hour: float
     finish_hour: float
     wait_hours: float
@@ -105,6 +120,7 @@ class PriorityMachineQueue:
                 job_type=selected_job.job_type,
                 priority=selected_job.priority,
                 arrival_hour=selected_job.arrival_hour,
+                arrival_hour_of_day=int(selected_job.arrival_hour % 24),
                 service_start_hour=service_start,
                 finish_hour=finish,
                 wait_hours=service_start - selected_job.arrival_hour,
@@ -135,25 +151,28 @@ class MeasurementLabSimulation:
     def __init__(
         self,
         machine_configs: List[MachineConfig],
-        job_type_shares: Optional[Dict[str, float]] = None,
         priority_map: Optional[Dict[str, int]] = None,
+        hourly_profile: Optional[Dict[str, List[float]]] = None,
         seed: int = 42,
     ):
         self.machine_configs = machine_configs
         self.random = random.Random(seed)
-        self.job_type_shares = job_type_shares or JOB_TYPE_SHARES
         self.priority_map = priority_map or PRIORITY_MAP
+        self.hourly_profile = hourly_profile or HOURLY_PROFILE
         self.queues = {cfg.name: PriorityMachineQueue(cfg) for cfg in machine_configs}
 
-    def _generate_arrivals(self, horizon_hours: float, count: int) -> List[float]:
-        arrivals = [self.random.uniform(0, horizon_hours) for _ in range(count)]
-        arrivals.sort()
-        return arrivals
-
     def _sample_job_type(self) -> str:
-        labels = list(self.job_type_shares.keys())
-        weights = list(self.job_type_shares.values())
+        totals = {job_type: sum(weights) for job_type, weights in self.hourly_profile.items()}
+        labels = list(totals.keys())
+        weights = list(totals.values())
         return self.random.choices(labels, weights=weights, k=1)[0]
+
+    def _sample_arrival_hour(self, horizon_days: float, job_type: str) -> float:
+        day = self.random.randrange(int(horizon_days))
+        hour_weights = self.hourly_profile[job_type]
+        hour = self.random.choices(range(24), weights=hour_weights, k=1)[0]
+        minute_fraction = self.random.random()
+        return day * 24 + hour + minute_fraction
 
     def _sample_service_time_hours(self, avg_minutes: float, job_type: str) -> float:
         mean_hours = max(avg_minutes / 60.0, 0.01)
@@ -161,15 +180,17 @@ class MeasurementLabSimulation:
         adjusted_mean = mean_hours * factor
         return max(self.random.triangular(adjusted_mean * 0.5, adjusted_mean * 1.8, adjusted_mean), 0.01)
 
-    def run(self, horizon_days: float = 90.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        horizon_hours = horizon_days * 22.0
+    def run(
+        self, horizon_days: float = 90.0
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        horizon_hours = horizon_days * 24.0
         global_job_id = 1
 
         for cfg in self.machine_configs:
-            arrivals = self._generate_arrivals(horizon_hours=horizon_hours, count=cfg.measurements)
-            for arrival_hour in arrivals:
+            for _ in range(cfg.measurements):
                 job_type = self._sample_job_type()
                 priority = self.priority_map[job_type]
+                arrival_hour = self._sample_arrival_hour(horizon_days=horizon_days, job_type=job_type)
                 service_hours = self._sample_service_time_hours(cfg.avg_measure_time_minutes, job_type)
                 self.queues[cfg.name].add_job(
                     Job(
@@ -219,7 +240,14 @@ class MeasurementLabSimulation:
             .reset_index()
         )
 
-        return jobs_df, summary_df, priority_summary_df, priority_pivot_df
+        arrival_profile_df = (
+            jobs_df.groupby(["arrival_hour_of_day", "job_type"])
+            .size()
+            .reset_index(name="jobs")
+            .sort_values(["arrival_hour_of_day", "job_type"])
+        )
+
+        return jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df
 
 
 def default_machine_configs() -> List[MachineConfig]:
@@ -246,6 +274,7 @@ def save_outputs(
     summary_df: pd.DataFrame,
     priority_summary_df: pd.DataFrame,
     priority_pivot_df: pd.DataFrame,
+    arrival_profile_df: pd.DataFrame,
     output_dir: str = "simulation_output",
 ) -> None:
     output_path = Path(output_dir)
@@ -254,12 +283,14 @@ def save_outputs(
     summary_df.to_csv(output_path / "summary.csv", index=False)
     priority_summary_df.to_csv(output_path / "priority_summary.csv", index=False)
     priority_pivot_df.to_csv(output_path / "priority_wait_matrix.csv", index=False)
+    arrival_profile_df.to_csv(output_path / "arrival_profile.csv", index=False)
 
 
 def print_report(
     summary_df: pd.DataFrame,
     priority_summary_df: pd.DataFrame,
     priority_pivot_df: pd.DataFrame,
+    arrival_profile_df: pd.DataFrame,
 ) -> None:
     print("\n=== OVERGRIPANDE RESULTAT PER MASKIN ===")
     print(summary_df.to_string(index=False))
@@ -269,6 +300,9 @@ def print_report(
 
     print("\n=== MATRIS: GENOMSNITTLIG VANTETID (TIMMAR) ===")
     print(priority_pivot_df.to_string(index=False))
+
+    print("\n=== ANKOMSTPROFIL PER TIMME OCH JOBBTYP ===")
+    print(arrival_profile_df.to_string(index=False))
 
     top_wait = summary_df.nlargest(5, "avg_wait_hours")[
         ["machine", "avg_wait_hours", "max_wait_hours", "simulated_utilization_pct"]
@@ -280,9 +314,9 @@ def print_report(
 def main() -> None:
     configs = default_machine_configs()
     sim = MeasurementLabSimulation(configs, seed=42)
-    jobs_df, summary_df, priority_summary_df, priority_pivot_df = sim.run(horizon_days=90.0)
-    save_outputs(jobs_df, summary_df, priority_summary_df, priority_pivot_df)
-    print_report(summary_df, priority_summary_df, priority_pivot_df)
+    jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df = sim.run(horizon_days=90.0)
+    save_outputs(jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df)
+    print_report(summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df)
 
 
 if __name__ == "__main__":
