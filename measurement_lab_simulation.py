@@ -1,322 +1,414 @@
 from __future__ import annotations
 
-import heapq
-import random
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import heapq
 import pandas as pd
 
 
-PRIORITY_MAP = {
-    "forstabit": 1,
-    "frekvensbit": 2,
-    "normalbit": 3,
-    "underhall": 4,
+INPUT_FILE = "mätresultat.xlsx"
+
+RAW_PRIORITY_TO_CLASS = {
+    "Förstabit": "fh",
+    "Förstabit UH": "fh",
+    "Normal": "normal",
 }
 
-JOB_TYPE_TIME_FACTORS = {
-    "forstabit": 1.15,
-    "frekvensbit": 1.00,
-    "normalbit": 1.00,
-    "underhall": 1.35,
+PRIORITY_ORDER = {
+    ("started", "fh"): 1,
+    ("started", "normal"): 2,
+    ("new", "fh"): 3,
+    ("new", "normal"): 4,
 }
 
-# Timprofil per jobbtyp, baserad på genomsnittligt inflöde över dygnet.
-# Värdena är relativa vikter per timme och normaliseras automatiskt.
-HOURLY_PROFILE = {
-    "forstabit": [
-        78, 66, 77, 69, 95, 36, 70, 128, 77, 150, 159, 113,
-        97, 83, 102, 105, 114, 129, 83, 117, 118, 87, 57, 42,
-    ],
-    "underhall": [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ],
-    "normalbit": [
-        232, 260, 188, 167, 95, 16, 217, 206, 92, 270, 201, 195,
-        86, 35, 222, 229, 155, 163, 96, 166, 98, 48, 13, 139,
-    ],
-    "frekvensbit": [
-        30, 32, 31, 28, 15, 4, 20, 24, 12, 28, 26, 22,
-        14, 8, 18, 20, 16, 18, 14, 16, 12, 8, 4, 10,
-    ],
-}
+MACHINE_COLUMNS = [
+    "Mätutrustning 1:",
+    "Mätutrustning 2:",
+    "Mätutrustning 3:",
+    "Mätutrustning 4:",
+]
+
+
+@dataclass
+class Article:
+    article_id: str
+    article_number: str
+    raw_priority: str
+    article_class: str
+    arrival_hour: float
+    required_machines: List[str]
+    measured_machines: List[str]
+    current_status: str
+    last_queue_entry_hour: float
+    total_wait_hours: float = 0.0
+    machine_visits: int = 0
+
+    @property
+    def remaining_machines(self) -> List[str]:
+        return [m for m in self.required_machines if m not in self.measured_machines]
+
+    def needs_machine(self, machine_name: str) -> bool:
+        return machine_name in self.remaining_machines
+
+    def current_priority_rank(self) -> int:
+        return PRIORITY_ORDER[(self.current_status, self.article_class)]
 
 
 @dataclass
 class MachineConfig:
     name: str
-    measurements: int
-    total_measure_time_hours: float
-    avg_measure_time_minutes: float
-    available_hours: float
-    historical_utilization_pct: float
+    avg_service_hours: float
 
 
 @dataclass
-class Job:
-    job_id: int
+class MachineRunRecord:
+    article_id: str
+    article_number: str
+    raw_priority: str
+    article_class: str
     machine: str
-    job_type: str
-    priority: int
+    queue_status: str
     arrival_hour: float
-    service_hours: float
-
-
-@dataclass
-class JobResult:
-    job_id: int
-    machine: str
-    job_type: str
-    priority: int
-    arrival_hour: float
-    arrival_hour_of_day: int
+    queue_entry_hour: float
     service_start_hour: float
     finish_hour: float
     wait_hours: float
     service_hours: float
-    total_time_hours: float
+    remaining_after_run: int
 
 
-class PriorityMachineQueue:
-    def __init__(self, config: MachineConfig):
-        self.config = config
-        self.jobs: List[JobResult] = []
-        self._queue: List[Tuple[float, int, int, Job]] = []
-        self._busy_until: float = 0.0
-        self._sequence: int = 0
+def to_hours_since_start(ts: pd.Timestamp, start_ts: pd.Timestamp) -> float:
+    return (ts - start_ts).total_seconds() / 3600.0
 
-    def add_job(self, job: Job) -> None:
-        self._sequence += 1
-        heapq.heappush(self._queue, (job.arrival_hour, job.priority, self._sequence, job))
 
-    def run_until_empty(self) -> None:
-        while self._queue:
-            arrival_hour, _, _, first_seen_job = heapq.heappop(self._queue)
-            current_time = max(self._busy_until, arrival_hour)
+def normalize_machine_name(value: object) -> Optional[str]:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text if text else None
 
-            ready_jobs: List[Tuple[int, int, Job]] = []
-            ready_jobs.append((first_seen_job.priority, first_seen_job.job_id, first_seen_job))
 
-            while self._queue and self._queue[0][0] <= current_time:
-                _, _, _, next_job = heapq.heappop(self._queue)
-                ready_jobs.append((next_job.priority, next_job.job_id, next_job))
+def convert_maskintid_to_hours(value) -> Optional[float]:
+    if pd.isna(value):
+        return None
 
-            ready_jobs.sort(key=lambda x: (x[0], x[1]))
-            _, _, selected_job = ready_jobs.pop(0)
+    if isinstance(value, pd.Timedelta):
+        return value.total_seconds() / 3600.0
 
-            for _, _, postponed_job in ready_jobs:
-                self.add_job(postponed_job)
+    if hasattr(value, "hour") and hasattr(value, "minute") and hasattr(value, "second"):
+        return value.hour + value.minute / 60.0 + value.second / 3600.0
 
-            service_start = max(selected_job.arrival_hour, self._busy_until)
-            finish = service_start + selected_job.service_hours
-            self._busy_until = finish
+    try:
+        td = pd.to_timedelta(value)
+        return td.total_seconds() / 3600.0
+    except Exception:
+        return None
 
-            result = JobResult(
-                job_id=selected_job.job_id,
-                machine=selected_job.machine,
-                job_type=selected_job.job_type,
-                priority=selected_job.priority,
-                arrival_hour=selected_job.arrival_hour,
-                arrival_hour_of_day=int(selected_job.arrival_hour % 24),
-                service_start_hour=service_start,
-                finish_hour=finish,
-                wait_hours=service_start - selected_job.arrival_hour,
-                service_hours=selected_job.service_hours,
-                total_time_hours=finish - selected_job.arrival_hour,
+
+def parse_input_file(path: str) -> Tuple[List[Article], Dict[str, MachineConfig]]:
+    df = pd.read_excel(path)
+
+    df = df[df["Prioritet:"].isin(RAW_PRIORITY_TO_CLASS.keys())].copy()
+
+    df["arrival_ts"] = pd.to_datetime(
+        df["Inlämn.datum:"].astype(str) + " " + df["Inlämn.tid:"].astype(str),
+        errors="coerce",
+    )
+    df = df.dropna(subset=["arrival_ts"])
+
+    df["service_hours"] = df["Maskintid"].apply(convert_maskintid_to_hours)
+
+    start_ts = pd.to_datetime(
+        df["Startdatum:"].astype(str) + " " + df["Starttid:"].astype(str),
+        errors="coerce",
+    )
+    end_ts = pd.to_datetime(
+        df["Slutdatum:"].astype(str) + " " + df["Sluttid:"].astype(str),
+        errors="coerce",
+    )
+
+    fallback_service = (end_ts - start_ts).dt.total_seconds() / 3600.0
+    df["service_hours"] = df["service_hours"].fillna(fallback_service)
+
+    df["article_class"] = df["Prioritet:"].map(RAW_PRIORITY_TO_CLASS)
+
+    df["machine_list"] = df[MACHINE_COLUMNS].apply(
+        lambda row: [m for m in (normalize_machine_name(v) for v in row) if m is not None],
+        axis=1,
+    )
+
+    df = df[df["machine_list"].map(len) > 0].copy()
+
+    start_of_horizon = df["arrival_ts"].min()
+    df["arrival_hour"] = df["arrival_ts"].apply(lambda x: to_hours_since_start(x, start_of_horizon))
+
+    machine_service: Dict[str, List[float]] = {}
+    for _, row in df.iterrows():
+        if pd.notna(row["service_hours"]) and row["service_hours"] > 0:
+            first_machine = row["machine_list"][0]
+            machine_service.setdefault(first_machine, []).append(float(row["service_hours"]))
+
+    machine_configs: Dict[str, MachineConfig] = {}
+    all_machines = sorted({m for machines in df["machine_list"] for m in machines})
+
+    overall_avg = df["service_hours"].dropna()
+    default_avg = float(overall_avg.mean()) if not overall_avg.empty else 0.25
+
+    for machine in all_machines:
+        values = machine_service.get(machine, [])
+        avg_service = float(pd.Series(values).mean()) if values else default_avg
+        machine_configs[machine] = MachineConfig(name=machine, avg_service_hours=max(avg_service, 0.01))
+
+    articles: List[Article] = []
+    for _, row in df.iterrows():
+        articles.append(
+            Article(
+                article_id=str(row["Löpnr:"]),
+                article_number=str(row["Artikelnr:"]),
+                raw_priority=str(row["Prioritet:"]),
+                article_class=str(row["article_class"]),
+                arrival_hour=float(row["arrival_hour"]),
+                required_machines=list(dict.fromkeys(row["machine_list"])),
+                measured_machines=[],
+                current_status="new",
+                last_queue_entry_hour=float(row["arrival_hour"]),
             )
-            self.jobs.append(result)
+        )
 
-    def summary(self, horizon_hours: float) -> Dict[str, float]:
-        busy_hours = sum(job.service_hours for job in self.jobs)
-        job_count = len(self.jobs)
-        avg_wait = sum(job.wait_hours for job in self.jobs) / job_count if job_count else 0.0
-        max_wait = max((job.wait_hours for job in self.jobs), default=0.0)
-        avg_total = sum(job.total_time_hours for job in self.jobs) / job_count if job_count else 0.0
-        return {
-            "machine": self.config.name,
-            "jobs_processed": job_count,
-            "avg_wait_hours": round(avg_wait, 3),
-            "max_wait_hours": round(max_wait, 3),
-            "avg_total_time_hours": round(avg_total, 3),
-            "simulated_busy_hours": round(busy_hours, 3),
-            "simulated_utilization_pct": round((100.0 * busy_hours / horizon_hours) if horizon_hours else 0.0, 2),
-            "historical_utilization_pct": self.config.historical_utilization_pct,
-        }
+    return articles, machine_configs
 
 
-class MeasurementLabSimulation:
-    def __init__(
-        self,
-        machine_configs: List[MachineConfig],
-        priority_map: Optional[Dict[str, int]] = None,
-        hourly_profile: Optional[Dict[str, List[float]]] = None,
-        seed: int = 42,
-    ):
+class FlexibleMeasurementLabSimulation:
+    def __init__(self, articles: List[Article], machine_configs: Dict[str, MachineConfig]):
+        self.articles: Dict[str, Article] = {a.article_id: a for a in articles}
         self.machine_configs = machine_configs
-        self.random = random.Random(seed)
-        self.priority_map = priority_map or PRIORITY_MAP
-        self.hourly_profile = hourly_profile or HOURLY_PROFILE
-        self.queues = {cfg.name: PriorityMachineQueue(cfg) for cfg in machine_configs}
+        self.records: List[MachineRunRecord] = []
+        self.machine_busy_until: Dict[str, float] = {name: 0.0 for name in machine_configs}
+        self.machine_busy_hours: Dict[str, float] = {name: 0.0 for name in machine_configs}
 
-    def _sample_job_type(self) -> str:
-        totals = {job_type: sum(weights) for job_type, weights in self.hourly_profile.items()}
-        labels = list(totals.keys())
-        weights = list(totals.values())
-        return self.random.choices(labels, weights=weights, k=1)[0]
+    def _all_done(self) -> bool:
+        return all(article.current_status == "done" for article in self.articles.values())
 
-    def _sample_arrival_hour(self, horizon_days: float, job_type: str) -> float:
-        day = self.random.randrange(int(horizon_days))
-        hour_weights = self.hourly_profile[job_type]
-        hour = self.random.choices(range(24), weights=hour_weights, k=1)[0]
-        minute_fraction = self.random.random()
-        return day * 24 + hour + minute_fraction
+    def _available_articles_for_machine(self, machine_name: str, current_time: float) -> List[Article]:
+        candidates: List[Article] = []
+        for article in self.articles.values():
+            if article.current_status == "done":
+                continue
+            if article.arrival_hour > current_time and article.current_status == "new":
+                continue
+            if article.needs_machine(machine_name):
+                candidates.append(article)
+        return candidates
 
-    def _sample_service_time_hours(self, avg_minutes: float, job_type: str) -> float:
-        mean_hours = max(avg_minutes / 60.0, 0.01)
-        factor = JOB_TYPE_TIME_FACTORS.get(job_type, 1.0)
-        adjusted_mean = mean_hours * factor
-        return max(self.random.triangular(adjusted_mean * 0.5, adjusted_mean * 1.8, adjusted_mean), 0.01)
+    def _select_article_for_machine(self, machine_name: str, current_time: float) -> Optional[Article]:
+        candidates = self._available_articles_for_machine(machine_name, current_time)
+        if not candidates:
+            return None
 
-    def run(
-        self, horizon_days: float = 90.0
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        horizon_hours = horizon_days * 24.0
-        global_job_id = 1
+        candidates.sort(
+            key=lambda a: (
+                a.current_priority_rank(),
+                a.last_queue_entry_hour,
+                a.arrival_hour,
+                a.article_id,
+            )
+        )
+        return candidates[0]
 
-        for cfg in self.machine_configs:
-            for _ in range(cfg.measurements):
-                job_type = self._sample_job_type()
-                priority = self.priority_map[job_type]
-                arrival_hour = self._sample_arrival_hour(horizon_days=horizon_days, job_type=job_type)
-                service_hours = self._sample_service_time_hours(cfg.avg_measure_time_minutes, job_type)
-                self.queues[cfg.name].add_job(
-                    Job(
-                        job_id=global_job_id,
-                        machine=cfg.name,
-                        job_type=job_type,
-                        priority=priority,
-                        arrival_hour=arrival_hour,
+    def _next_article_arrival_after(self, current_time: float) -> Optional[float]:
+        future_times = [
+            article.arrival_hour
+            for article in self.articles.values()
+            if article.current_status == "new" and article.arrival_hour > current_time
+        ]
+        return min(future_times) if future_times else None
+
+    def run(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        current_time = min(article.arrival_hour for article in self.articles.values())
+
+        while not self._all_done():
+            progress_made = False
+
+            for machine_name, cfg in self.machine_configs.items():
+                if self.machine_busy_until[machine_name] > current_time:
+                    continue
+
+                article = self._select_article_for_machine(machine_name, current_time)
+                if article is None:
+                    continue
+
+                queue_status = article.current_status
+                service_start = current_time
+                wait_hours = service_start - article.last_queue_entry_hour
+                service_hours = cfg.avg_service_hours
+                finish_hour = service_start + service_hours
+
+                article.total_wait_hours += max(wait_hours, 0.0)
+                article.machine_visits += 1
+                article.measured_machines.append(machine_name)
+
+                remaining_after = len(article.remaining_machines)
+                if remaining_after == 0:
+                    article.current_status = "done"
+                else:
+                    article.current_status = "started"
+                    article.last_queue_entry_hour = finish_hour
+
+                self.machine_busy_until[machine_name] = finish_hour
+                self.machine_busy_hours[machine_name] += service_hours
+
+                self.records.append(
+                    MachineRunRecord(
+                        article_id=article.article_id,
+                        article_number=article.article_number,
+                        raw_priority=article.raw_priority,
+                        article_class=article.article_class,
+                        machine=machine_name,
+                        queue_status=queue_status,
+                        arrival_hour=article.arrival_hour,
+                        queue_entry_hour=service_start - wait_hours,
+                        service_start_hour=service_start,
+                        finish_hour=finish_hour,
+                        wait_hours=max(wait_hours, 0.0),
                         service_hours=service_hours,
+                        remaining_after_run=remaining_after,
                     )
                 )
-                global_job_id += 1
+                progress_made = True
 
-        results: List[JobResult] = []
-        for queue in self.queues.values():
-            queue.run_until_empty()
-            results.extend(queue.jobs)
+            if progress_made:
+                future_finish = [t for t in self.machine_busy_until.values() if t > current_time]
+                next_finish = min(future_finish) if future_finish else None
+                next_arrival = self._next_article_arrival_after(current_time)
+                candidates = [t for t in [next_finish, next_arrival] if t is not None]
+                if candidates:
+                    current_time = min(candidates)
+                continue
 
-        jobs_df = pd.DataFrame(asdict(r) for r in results)
+            future_finish = [t for t in self.machine_busy_until.values() if t > current_time]
+            next_finish = min(future_finish) if future_finish else None
+            next_arrival = self._next_article_arrival_after(current_time)
+            candidates = [t for t in [next_finish, next_arrival] if t is not None]
+            if not candidates:
+                break
+            current_time = min(candidates)
 
-        summary_df = pd.DataFrame(
-            queue.summary(horizon_hours=horizon_hours) for queue in self.queues.values()
-        ).sort_values(["simulated_utilization_pct", "avg_wait_hours"], ascending=[False, False])
+        runs_df = pd.DataFrame(asdict(r) for r in self.records)
 
-        priority_summary_df = (
-            jobs_df.groupby(["machine", "job_type"])
+        if runs_df.empty:
+            return runs_df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+        horizon_hours = runs_df["finish_hour"].max()
+
+        machine_summary_df = (
+            runs_df.groupby("machine")
             .agg(
-                jobs=("job_id", "count"),
+                machine_runs=("article_id", "count"),
+                unique_articles=("article_id", pd.Series.nunique),
                 avg_wait_hours=("wait_hours", "mean"),
                 max_wait_hours=("wait_hours", "max"),
-                avg_total_time_hours=("total_time_hours", "mean"),
                 avg_service_hours=("service_hours", "mean"),
+                last_finish_hour=("finish_hour", "max"),
             )
             .reset_index()
             .round(3)
-            .sort_values(["machine", "avg_wait_hours"], ascending=[True, False])
         )
 
-        priority_pivot_df = (
-            priority_summary_df.pivot(
-                index="machine",
-                columns="job_type",
-                values="avg_wait_hours",
+        machine_summary_df["simulated_utilization_pct"] = machine_summary_df["machine"].map(
+            lambda m: round(100.0 * self.machine_busy_hours[m] / horizon_hours, 2) if horizon_hours > 0 else 0.0
+        )
+        machine_summary_df = machine_summary_df.sort_values(
+            ["simulated_utilization_pct", "avg_wait_hours"], ascending=[False, False]
+        )
+
+        article_summary_rows = []
+        for article in self.articles.values():
+            article_runs = runs_df[runs_df["article_id"] == article.article_id].sort_values("service_start_hour")
+            if article_runs.empty:
+                continue
+            article_summary_rows.append(
+                {
+                    "article_id": article.article_id,
+                    "article_number": article.article_number,
+                    "raw_priority": article.raw_priority,
+                    "article_class": article.article_class,
+                    "required_machine_count": len(article.required_machines),
+                    "completed_machine_count": len(article.measured_machines),
+                    "arrival_hour": round(article.arrival_hour, 3),
+                    "first_start_hour": round(article_runs["service_start_hour"].min(), 3),
+                    "finish_hour": round(article_runs["finish_hour"].max(), 3),
+                    "total_wait_hours": round(article.total_wait_hours, 3),
+                    "total_lead_time_hours": round(article_runs["finish_hour"].max() - article.arrival_hour, 3),
+                    "machine_route_used": " -> ".join(article_runs["machine"].tolist()),
+                }
             )
-            .round(3)
-            .fillna(0)
+
+        article_summary_df = pd.DataFrame(article_summary_rows).sort_values("finish_hour")
+
+        priority_summary_df = (
+            article_summary_df.groupby(["article_class", "raw_priority"])
+            .agg(
+                articles=("article_id", "count"),
+                avg_total_wait_hours=("total_wait_hours", "mean"),
+                max_total_wait_hours=("total_wait_hours", "max"),
+                avg_lead_time_hours=("total_lead_time_hours", "mean"),
+                avg_required_machine_count=("required_machine_count", "mean"),
+            )
             .reset_index()
+            .round(3)
+            .sort_values(["article_class", "avg_total_wait_hours"], ascending=[True, False])
         )
 
-        arrival_profile_df = (
-            jobs_df.groupby(["arrival_hour_of_day", "job_type"])
-            .size()
-            .reset_index(name="jobs")
-            .sort_values(["arrival_hour_of_day", "job_type"])
-        )
-
-        return jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df
-
-
-def default_machine_configs() -> List[MachineConfig]:
-    return [
-        MachineConfig("Konturograf", 44, 31.667, 43.18, 396.0, 8.00),
-        MachineConfig("Konturograf 2", 50, 14.550, 17.47, 396.0, 4.19),
-        MachineConfig("P40 1", 2607, 925.500, 21.30, 1980.0, 47.66),
-        MachineConfig("P65", 711, 714.017, 60.25, 1980.0, 36.52),
-        MachineConfig("Wenzel WGT350", 2397, 1028.183, 25.73, 1980.0, 62.93),
-        MachineConfig("Wenzel WGT400", 2345, 1024.667, 26.22, 1980.0, 68.06),
-        MachineConfig("Wenzel WGT500", 2234, 902.000, 24.24, 1980.0, 56.20),
-        MachineConfig("Wenzel WGT500 2", 787, 943.250, 71.92, 1980.0, 56.84),
-        MachineConfig("Wenzel WGT600", 2220, 994.883, 26.88, 1980.0, 68.60),
-        MachineConfig("Ytmatare", 146, 46.283, 19.01, 1980.0, 39.95),
-        MachineConfig("Zeiss 1", 1330, 504.167, 22.75, 1980.0, 64.84),
-        MachineConfig("Zeiss 12", 17, 13.717, 48.42, 1980.0, 0.94),
-        MachineConfig("Zeiss 14", 272, 475.850, 104.83, 1980.0, 38.88),
-        MachineConfig("Zeiss 15", 367, 264.483, 43.24, 1980.0, 24.35),
-    ]
+        return runs_df, machine_summary_df, article_summary_df, priority_summary_df
 
 
 def save_outputs(
-    jobs_df: pd.DataFrame,
-    summary_df: pd.DataFrame,
+    runs_df: pd.DataFrame,
+    machine_summary_df: pd.DataFrame,
+    article_summary_df: pd.DataFrame,
     priority_summary_df: pd.DataFrame,
-    priority_pivot_df: pd.DataFrame,
-    arrival_profile_df: pd.DataFrame,
     output_dir: str = "simulation_output",
 ) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    jobs_df.to_csv(output_path / "jobs.csv", index=False)
-    summary_df.to_csv(output_path / "summary.csv", index=False)
+    runs_df.to_csv(output_path / "machine_runs.csv", index=False)
+    machine_summary_df.to_csv(output_path / "machine_summary.csv", index=False)
+    article_summary_df.to_csv(output_path / "article_summary.csv", index=False)
     priority_summary_df.to_csv(output_path / "priority_summary.csv", index=False)
-    priority_pivot_df.to_csv(output_path / "priority_wait_matrix.csv", index=False)
-    arrival_profile_df.to_csv(output_path / "arrival_profile.csv", index=False)
 
 
 def print_report(
-    summary_df: pd.DataFrame,
+    machine_summary_df: pd.DataFrame,
+    article_summary_df: pd.DataFrame,
     priority_summary_df: pd.DataFrame,
-    priority_pivot_df: pd.DataFrame,
-    arrival_profile_df: pd.DataFrame,
 ) -> None:
-    print("\n=== OVERGRIPANDE RESULTAT PER MASKIN ===")
-    print(summary_df.to_string(index=False))
+    print("\n=== MASKINSAMMANFATTNING ===")
+    print(machine_summary_df.to_string(index=False))
 
-    print("\n=== VANTETID PER MASKIN OCH JOBBTYP ===")
+    print("\n=== PRIORITETSSAMMANFATTNING PER ARTIKELKLASS ===")
     print(priority_summary_df.to_string(index=False))
 
-    print("\n=== MATRIS: GENOMSNITTLIG VANTETID (TIMMAR) ===")
-    print(priority_pivot_df.to_string(index=False))
-
-    print("\n=== ANKOMSTPROFIL PER TIMME OCH JOBBTYP ===")
-    print(arrival_profile_df.to_string(index=False))
-
-    top_wait = summary_df.nlargest(5, "avg_wait_hours")[
-        ["machine", "avg_wait_hours", "max_wait_hours", "simulated_utilization_pct"]
+    print("\n=== TOPP 10 ARTIKLAR MED LANGST TOTAL VANTETID ===")
+    top_articles = article_summary_df.nlargest(10, "total_wait_hours")[
+        [
+            "article_id",
+            "raw_priority",
+            "required_machine_count",
+            "total_wait_hours",
+            "total_lead_time_hours",
+            "machine_route_used",
+        ]
     ]
-    print("\n=== TOPP 5 MASKINER MED LANGST GENOMSNITTLIG VANTETID ===")
-    print(top_wait.to_string(index=False))
+    print(top_articles.to_string(index=False))
 
 
 def main() -> None:
-    configs = default_machine_configs()
-    sim = MeasurementLabSimulation(configs, seed=42)
-    jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df = sim.run(horizon_days=90.0)
-    save_outputs(jobs_df, summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df)
-    print_report(summary_df, priority_summary_df, priority_pivot_df, arrival_profile_df)
+    articles, machine_configs = parse_input_file(INPUT_FILE)
+    sim = FlexibleMeasurementLabSimulation(articles, machine_configs)
+    runs_df, machine_summary_df, article_summary_df, priority_summary_df = sim.run()
+    save_outputs(runs_df, machine_summary_df, article_summary_df, priority_summary_df)
+    print_report(machine_summary_df, article_summary_df, priority_summary_df)
 
 
 if __name__ == "__main__":
