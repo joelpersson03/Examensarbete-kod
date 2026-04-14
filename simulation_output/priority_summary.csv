@@ -1,0 +1,57 @@
+machine,job_type,jobs,avg_wait_hours,max_wait_hours,avg_total_time_hours,avg_service_hours
+Konturograf,forstabit,6,0.0,0.0,0.87,0.87
+Konturograf,frekvensbit,11,0.0,0.0,0.813,0.813
+Konturograf,normalbit,21,0.0,0.0,0.763,0.763
+Konturograf,underhall,6,0.0,0.0,1.178,1.178
+Konturograf 2,forstabit,4,0.0,0.0,0.327,0.327
+Konturograf 2,frekvensbit,12,0.0,0.0,0.341,0.341
+Konturograf 2,normalbit,28,0.0,0.014,0.326,0.325
+Konturograf 2,underhall,6,0.0,0.0,0.542,0.542
+P40 1,underhall,256,0.473,8.867,1.011,0.537
+P40 1,normalbit,1580,0.26,2.573,0.648,0.388
+P40 1,frekvensbit,518,0.148,1.527,0.535,0.387
+P40 1,forstabit,253,0.116,0.884,0.569,0.453
+P65,underhall,68,0.603,4.505,2.092,1.489
+P65,normalbit,430,0.432,4.163,1.539,1.107
+P65,frekvensbit,138,0.408,3.267,1.5,1.092
+P65,forstabit,75,0.239,1.301,1.514,1.275
+Wenzel WGT350,underhall,218,0.893,9.702,1.539,0.646
+Wenzel WGT350,normalbit,1451,0.383,4.146,0.857,0.473
+Wenzel WGT350,frekvensbit,465,0.191,1.412,0.663,0.472
+Wenzel WGT350,forstabit,263,0.161,0.934,0.693,0.532
+Wenzel WGT400,underhall,225,0.727,7.074,1.352,0.625
+Wenzel WGT400,normalbit,1373,0.368,4.165,0.844,0.476
+Wenzel WGT400,frekvensbit,509,0.23,2.547,0.711,0.481
+Wenzel WGT400,forstabit,238,0.15,0.849,0.709,0.56
+Wenzel WGT500,underhall,234,0.525,5.94,1.125,0.6
+Wenzel WGT500,normalbit,1340,0.288,4.608,0.73,0.442
+Wenzel WGT500,frekvensbit,439,0.173,1.63,0.616,0.443
+Wenzel WGT500,forstabit,221,0.124,0.954,0.623,0.5
+Wenzel WGT500 2,underhall,84,1.459,18.0,3.265,1.807
+Wenzel WGT500 2,normalbit,475,1.027,7.23,2.36,1.333
+Wenzel WGT500 2,frekvensbit,151,0.503,2.543,1.795,1.293
+Wenzel WGT500 2,forstabit,77,0.372,2.43,1.886,1.514
+Wenzel WGT600,underhall,266,0.872,12.831,1.525,0.653
+Wenzel WGT600,normalbit,1338,0.376,3.66,0.873,0.497
+Wenzel WGT600,frekvensbit,414,0.216,1.503,0.713,0.497
+Wenzel WGT600,forstabit,202,0.15,1.009,0.729,0.579
+Ytmatare,normalbit,81,0.007,0.408,0.355,0.348
+Ytmatare,forstabit,23,0.0,0.0,0.365,0.365
+Ytmatare,frekvensbit,25,0.0,0.0,0.359,0.359
+Ytmatare,underhall,17,0.0,0.0,0.454,0.454
+Zeiss 1,underhall,132,0.12,1.439,0.668,0.548
+Zeiss 1,normalbit,782,0.099,1.559,0.517,0.417
+Zeiss 1,forstabit,153,0.082,1.133,0.553,0.471
+Zeiss 1,frekvensbit,263,0.073,1.047,0.488,0.415
+Zeiss 12,forstabit,1,0.0,0.0,0.648,0.648
+Zeiss 12,frekvensbit,6,0.0,0.0,0.749,0.749
+Zeiss 12,normalbit,7,0.0,0.0,1.044,1.044
+Zeiss 12,underhall,3,0.0,0.0,1.103,1.103
+Zeiss 14,normalbit,160,0.32,4.985,2.202,1.883
+Zeiss 14,underhall,22,0.21,3.403,2.766,2.555
+Zeiss 14,frekvensbit,60,0.195,1.882,2.156,1.961
+Zeiss 14,forstabit,30,0.14,1.772,2.285,2.145
+Zeiss 15,underhall,32,0.2,2.272,1.252,1.053
+Zeiss 15,normalbit,225,0.072,1.227,0.863,0.791
+Zeiss 15,frekvensbit,75,0.069,0.874,0.854,0.785
+Zeiss 15,forstabit,35,0.052,1.02,0.995,0.943
